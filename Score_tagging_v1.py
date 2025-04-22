@@ -1,9 +1,11 @@
 """
-Recursively tag every image under a chosen root directory with a YOLO classifier.
+Recursively tag every image under a chosen root directory with a YOLO classifier
+and store a mapped tag next to each image.
 
-• Select a single “root” folder in a GUI dialog.
-• All images in that folder and in *all* of its sub‑folders are processed.
-• A .txt file with the mapped tag is created/updated next to each image.
+Changes (22 Apr 2025)
+─────────────────────
+• Added `select_model_file()` to let the user choose a .pt model file via GUI.
+• `main()` now calls that helper and feeds the chosen path into YOLO().
 """
 
 from __future__ import annotations
@@ -27,13 +29,24 @@ def select_root_folder() -> str:
     folder = filedialog.askdirectory(title="Select the *top‑level* folder containing images")
     if not folder:
         raise SystemExit("No folder selected — cancelled.")
+    root.destroy()
     return folder
 
 
+def select_model_file() -> str:
+    """Open a file‑picker and return the selected YOLO .pt model path."""
+    root = tk.Tk()
+    root.withdraw()
+    filetypes = [("PyTorch model", "*.pt"), ("All files", "*.*")]
+    model_path = filedialog.askopenfilename(title="Select a YOLO model (.pt)", filetypes=filetypes)
+    if not model_path:
+        raise SystemExit("No model selected — cancelled.")
+    root.destroy()
+    return model_path
+
+
 def gather_image_paths(root: str, exts: Optional[set[str]] = None) -> List[str]:
-    """
-    Recursively yield paths to files whose extension is in *exts*.
-    """
+    """Recursively collect image paths whose extension is in *exts*."""
     exts = exts or {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
     return [str(p) for p in Path(root).rglob("*") if p.suffix.lower() in exts]
 
@@ -41,7 +54,7 @@ def gather_image_paths(root: str, exts: Optional[set[str]] = None) -> List[str]:
 # ── Image utilities ──────────────────────────────────────────────────────────
 def load_and_resize(path: str, target: int = 224) -> Optional[np.ndarray]:
     """
-    Read *path* with Pillow and resize so the shorter edge == *target* px
+    Read *path* with Pillow and resize so the shorter edge == *target* px
     (aspect ratio preserved). Return an RGB numpy array.
     """
     try:
@@ -58,9 +71,7 @@ def load_and_resize(path: str, target: int = 224) -> Optional[np.ndarray]:
 
 
 def append_tag_file(image_path: str, tag: str) -> None:
-    """
-    Create (or append to) a .txt file next to *image_path* with *tag*.
-    """
+    """Create (or append to) a .txt file next to *image_path* with *tag*."""
     txt_path = Path(image_path).with_suffix(".txt")
     try:
         existing = txt_path.read_text().strip() if txt_path.exists() else ""
@@ -77,16 +88,14 @@ async def classify_one(
     sem: asyncio.Semaphore,
     pbar: tqdm,
 ) -> Optional[str]:
-    async with sem:  # limit concurrent GPU calls
+    async with sem:
         img = await asyncio.to_thread(load_and_resize, path)
-        if img is None:           # could not be opened / resized
+        if img is None:
             pbar.update(1)
             return None
 
-        # YOLO forward pass (on separate thread to keep event‑loop free)
         result = await asyncio.to_thread(lambda: model(img)[0])
 
-        # prefer result.probs (classification) to result.pred (detection)
         if not result.probs:
             tqdm.write(f"⚠️  No prediction for {Path(path).name}")
             pbar.update(1)
@@ -117,10 +126,7 @@ async def process_directory(
     tally: Dict[str, int] = {}
 
     with tqdm(total=len(paths), desc="Tagging images") as pbar:
-        tasks = [
-            classify_one(p, model, mapping, sem, pbar)
-            for p in paths
-        ]
+        tasks = [classify_one(p, model, mapping, sem, pbar) for p in paths]
         for tag in await asyncio.gather(*tasks):
             if tag:
                 tally[tag] = tally.get(tag, 0) + 1
@@ -133,7 +139,8 @@ async def process_directory(
 # ── main ─────────────────────────────────────────────────────────────────────
 def main() -> None:
     root_dir = select_root_folder()
-    model = YOLO(r".\YOLO tagging\models\score_model_v1.pt")  # adjust as needed
+    model_path = select_model_file()          # NEW ➜ pick the .pt file interactively
+    model = YOLO(model_path)
 
     custom_mapping = {
         "Top10": "masterpiece",
@@ -157,3 +164,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
